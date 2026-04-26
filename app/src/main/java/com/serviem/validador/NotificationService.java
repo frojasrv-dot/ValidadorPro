@@ -1,70 +1,78 @@
 package com.serviem.validador;
 
-import android.service.notification.NotificationListenerService;
-import android.service.notification.StatusBarNotification;
-import android.provider.Settings;
+import android.accessibilityservice.AccessibilityService;
+import android.view.accessibility.AccessibilityEvent;
+import android.app.Notification;
 import android.os.Bundle;
+import android.provider.Settings;
 import android.content.Context;
 import android.content.SharedPreferences;
-import java.io.InputStream;
 import java.io.OutputStream;
 import java.net.HttpURLConnection;
 import java.net.URL;
 import org.json.JSONObject;
 
-public class NotificationService extends NotificationListenerService {
+public class NotificationService extends AccessibilityService {
 
     @Override
-    public void onNotificationPosted(StatusBarNotification sbn) {
-        try {
-            if (sbn == null || sbn.getNotification() == null || sbn.getNotification().extras == null) return;
-            
-            String packageName = sbn.getPackageName();
-            Bundle extras = sbn.getNotification().extras;
-            
-            // Extraer Título y Texto de forma segura (CharSequence)
-            CharSequence titleChars = extras.getCharSequence("android.title");
-            CharSequence textChars = extras.getCharSequence("android.text");
-            
-            String title = titleChars != null ? titleChars.toString() : "";
-            String text = textChars != null ? textChars.toString() : "";
-            String contenidoCompleto = title + " " + text;
+    public void onAccessibilityEvent(AccessibilityEvent event) {
+        // Detecta cambios en las notificaciones a nivel de sistema (Accesibilidad)
+        if (event.getEventType() == AccessibilityEvent.TYPE_NOTIFICATION_STATE_CHANGED) {
+            try {
+                // Capturamos la notificación del evento
+                Notification notification = (Notification) event.getParcelableData();
+                if (notification == null || notification.extras == null) return;
 
-            String deviceId = Settings.Secure.getString(getContentResolver(), Settings.Secure.ANDROID_ID);
+                Bundle extras = notification.extras;
+                
+                // Extraemos Título y Texto de forma segura
+                CharSequence titleChars = extras.getCharSequence("android.title");
+                CharSequence textChars = extras.getCharSequence("android.text");
+                
+                String title = titleChars != null ? titleChars.toString() : "";
+                String text = textChars != null ? textChars.toString() : "";
+                String contenidoCompleto = (title + " " + text).toLowerCase();
 
-            String metodo = "";
-            String lowerPackage = packageName.toLowerCase();
-            String lowerContenido = contenidoCompleto.toLowerCase();
+                String metodo = "";
+                // Radar de Billeteras
+                if (contenidoCompleto.contains("yape")) metodo = "YAPE";
+                else if (contenidoCompleto.contains("plin")) metodo = "PLIN";
+                else if (contenidoCompleto.contains("izipay")) metodo = "IZIPAY";
 
-            // Radar de Billeteras
-            if (lowerPackage.contains("yape") || lowerContenido.contains("yape")) metodo = "YAPE";
-            else if (lowerPackage.contains("plin") || lowerContenido.contains("plin")) metodo = "PLIN";
-            else if (lowerPackage.contains("izipay") || lowerContenido.contains("izipay")) metodo = "IZIPAY";
-
-            if (!metodo.equals("")) {
-                String monto = "0.00";
-                if (contenidoCompleto.contains("S/")) {
-                    try {
-                        String[] partes = contenidoCompleto.split("S/");
-                        if (partes.length > 1) {
-                            // Limpia el monto: toma el número después de S/
-                            monto = partes[1].trim().split(" ")[0].replaceAll("[^0-9.]", "");
+                if (!metodo.equals("")) {
+                    String monto = "0.00";
+                    if (contenidoCompleto.contains("s/")) {
+                        try {
+                            String[] partes = contenidoCompleto.split("s/");
+                            if (partes.length > 1) {
+                                // Extrae el número después de S/ y limpia caracteres no numéricos
+                                monto = partes[1].trim().split(" ")[0].replaceAll("[^0-9.]", "");
+                            }
+                        } catch (Exception e) {
+                            monto = "0.00";
                         }
-                    } catch (Exception e) {
-                        monto = "ERROR";
                     }
+
+                    // --- ACTUALIZAR LOG EN PANTALLA ---
+                    SharedPreferences pref = getSharedPreferences("DebugLog", Context.MODE_PRIVATE);
+                    pref.edit().putString("ultimo", "Capturado: " + metodo + " S/ " + monto).apply();
+                    // ----------------------------------
+
+                    // Identificador del celular
+                    String deviceId = Settings.Secure.getString(getContentResolver(), Settings.Secure.ANDROID_ID);
+                    
+                    // Disparamos el envío al servidor
+                    enviarAServidor(deviceId, metodo, monto);
                 }
-
-                // --- SISTEMA DE LOG PARA LA PANTALLA ---
-                SharedPreferences pref = getSharedPreferences("DebugLog", Context.MODE_PRIVATE);
-                pref.edit().putString("ultimo", "Detectado: " + metodo + " | S/ " + monto).apply();
-                // ---------------------------------------
-
-                enviarAServidor(deviceId, metodo, monto);
+            } catch (Exception e) {
+                // Silenciamos errores para que el servicio no se detenga
             }
-        } catch (Exception e) {
-            // Error silencioso para no detener el servicio
         }
+    }
+
+    @Override
+    public void onInterrupt() {
+        // Obligatorio para AccessibilityService
     }
 
     private void enviarAServidor(String id, String met, String mon) {
@@ -76,13 +84,14 @@ public class NotificationService extends NotificationListenerService {
                 conn.setRequestProperty("Content-Type", "application/json; utf-8");
                 conn.setRequestProperty("Accept", "application/json");
                 conn.setDoOutput(true);
-                conn.setConnectTimeout(15000); 
-                conn.setReadTimeout(15000);
+                conn.setConnectTimeout(10000);
+                conn.setReadTimeout(10000);
 
                 JSONObject json = new JSONObject();
                 json.put("device_id", id);
                 json.put("metodo", met);
                 json.put("monto", mon);
+                // Generamos un ID de operación temporal basado en el tiempo
                 json.put("operacion", "AUTO_" + System.currentTimeMillis());
 
                 try (OutputStream os = conn.getOutputStream()) {
@@ -91,16 +100,11 @@ public class NotificationService extends NotificationListenerService {
                     os.flush();
                 }
 
-                // Forzar lectura para asegurar que el paquete salió
-                int code = conn.getResponseCode();
-                InputStream is = (code >= 200 && code < 300) ? conn.getInputStream() : conn.getErrorStream();
-                if (is != null) {
-                    is.read();
-                    is.close();
-                }
+                // Verificamos respuesta para confirmar que el servidor recibió el dato
+                conn.getResponseCode();
                 conn.disconnect();
             } catch (Exception e) {
-                // Si falla el internet, el log en pantalla nos avisará que al menos se intentó
+                // Error de red
             }
         }).start();
     }
