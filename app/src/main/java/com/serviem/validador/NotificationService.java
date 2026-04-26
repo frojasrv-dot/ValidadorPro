@@ -4,6 +4,7 @@ import android.service.notification.NotificationListenerService;
 import android.service.notification.StatusBarNotification;
 import android.content.Context;
 import android.provider.Settings;
+import android.os.Bundle;
 import org.json.JSONObject;
 import java.io.OutputStream;
 import java.net.HttpURLConnection;
@@ -13,28 +14,38 @@ public class NotificationService extends NotificationListenerService {
     @Override
     public void onNotificationPosted(StatusBarNotification sbn) {
         try {
-            // Extraer texto de la notificación
-            CharSequence title = sbn.getNotification().extras.getCharSequence("android.title");
-            CharSequence text = sbn.getNotification().extras.getCharSequence("android.text");
+            Bundle extras = sbn.getNotification().extras;
+            String title = String.valueOf(extras.getCharSequence("android.title"));
+            String text = String.valueOf(extras.getCharSequence("android.text"));
             String fullText = (title + " " + text).toLowerCase();
 
-            // Si es un pago de Yape o Plin
-            if (fullText.contains("yape") || fullText.contains("plin")) {
+            // LOG DE EMERGENCIA: Para ver qué capturó exactamente
+            getSharedPreferences("Debug", MODE_PRIVATE).edit()
+                .putString("log", "Ultima notif: " + title).apply();
+
+            // Si el mensaje es de Yape o Plin
+            if (fullText.contains("yape") || fullText.contains("plin") || fullText.contains("recibido")) {
+                
+                // Intentamos capturar el monto de varias formas
                 String monto = "0.00";
                 if (fullText.contains("s/")) {
-                    monto = fullText.split("s/")[1].trim().split(" ")[0].replaceAll("[^0-9.]", "");
+                    try {
+                        monto = fullText.split("s/")[1].trim().split(" ")[0].replaceAll("[^0-9.]", "");
+                    } catch (Exception e) { monto = "Error Monto"; }
                 }
 
-                // Guardar log para la pantalla del celular
-                getSharedPreferences("Debug", MODE_PRIVATE).edit().putString("log", "Ultimo: " + monto).apply();
+                // Guardar log detallado para que me digas qué sale
+                getSharedPreferences("Debug", MODE_PRIVATE).edit()
+                    .putString("log", "¡PAGO DETECTADO!\nOrigen: " + title + "\nMonto: " + monto).apply();
                 
-                // Enviar al servidor de PythonAnywhere
-                enviarSvr(Settings.Secure.getString(getContentResolver(), Settings.Secure.ANDROID_ID), monto);
+                enviarSvr(Settings.Secure.getString(getContentResolver(), Settings.Secure.ANDROID_ID), monto, fullText.contains("yape") ? "YAPE" : "PLIN");
             }
-        } catch (Exception e) {}
+        } catch (Exception e) {
+            getSharedPreferences("Debug", MODE_PRIVATE).edit().putString("log", "Error sensor: " + e.getMessage()).apply();
+        }
     }
 
-    private void enviarSvr(String id, String m) {
+    private void enviarSvr(String id, String m, String tipo) {
         new Thread(() -> {
             try {
                 HttpURLConnection c = (HttpURLConnection) new URL("https://serviem.pythonanywhere.com/api/notificacion").openConnection();
@@ -45,8 +56,8 @@ public class NotificationService extends NotificationListenerService {
                 JSONObject j = new JSONObject();
                 j.put("device_id", id);
                 j.put("monto", m);
-                j.put("metodo", "AUTO");
-                j.put("operacion", "OP_" + System.currentTimeMillis());
+                j.put("metodo", tipo);
+                j.put("operacion", "AUTO_" + System.currentTimeMillis());
 
                 try (OutputStream os = c.getOutputStream()) {
                     os.write(j.toString().getBytes());
