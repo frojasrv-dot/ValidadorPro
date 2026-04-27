@@ -3,6 +3,7 @@ package com.serviem.validador;
 import android.service.notification.NotificationListenerService;
 import android.service.notification.StatusBarNotification;
 import android.content.Context;
+import android.content.ComponentName;
 import android.provider.Settings;
 import android.os.Bundle;
 import org.json.JSONObject;
@@ -17,18 +18,29 @@ import java.util.Locale;
 
 public class NotificationService extends NotificationListenerService {
 
-    // 🛡️ LA LISTA BLANCA DE SEGURIDAD
     private static final List<String> APPS_PERMITIDAS = Arrays.asList(
-        "com.bcp.innovacxion.yape",
-        "com.bcp.innovacxion.yapeapp",
-        "com.scotiabank.bancamovil",
-        "pe.com.interbank.mobilebanking",
-        "com.bbva.bbvacontinental",
-        "pe.com.banbif.movil",
-        "com.izipay.app",
-        "pe.com.izipay.app",
-        "com.izipay.izipayya"
+        "com.bcp.innovacxion.yape", "com.bcp.innovacxion.yapeapp",
+        "com.scotiabank.bancamovil", "pe.com.interbank.mobilebanking",
+        "com.bbva.bbvacontinental", "pe.com.banbif.movil",
+        "com.izipay.app", "pe.com.izipay.app", "com.izipay.izipayya"
     );
+
+    // 🟢 SENSOR DE VIDA: Nos avisa si Android conectó el cable
+    @Override
+    public void onListenerConnected() {
+        getSharedPreferences("Debug", MODE_PRIVATE).edit()
+            .putString("log", "🟢 SENSOR CONECTADO Y ACTIVO\nEsperando pagos...").apply();
+    }
+
+    // 🔴 SENSOR DE MUERTE: Nos avisa si Android nos cortó el cable e intenta auto-repararse
+    @Override
+    public void onListenerDisconnected() {
+        getSharedPreferences("Debug", MODE_PRIVATE).edit()
+            .putString("log", "🔴 SENSOR DESCONECTADO POR ANDROID\nIntentando auto-reconectar...").apply();
+        try {
+            requestRebind(new ComponentName(this, NotificationListenerService.class));
+        } catch (Exception e) {}
+    }
 
     @Override
     public void onNotificationPosted(StatusBarNotification sbn) {
@@ -37,16 +49,11 @@ public class NotificationService extends NotificationListenerService {
                 if (sbn == null || sbn.getNotification() == null || sbn.getNotification().extras == null) return;
 
                 String packageName = sbn.getPackageName().toLowerCase();
-
-                // 🛑 FILTRO 1: ¿Es un banco o pasarela autorizada?
                 boolean esBancoAutorizado = false;
                 for (String app : APPS_PERMITIDAS) {
-                    if (packageName.contains(app)) {
-                        esBancoAutorizado = true;
-                        break;
-                    }
+                    if (packageName.contains(app)) { esBancoAutorizado = true; break; }
                 }
-                if (!esBancoAutorizado) return; // Si es WhatsApp o SMS, muere aquí.
+                if (!esBancoAutorizado) return; 
 
                 Bundle extras = sbn.getNotification().extras;
                 StringBuilder volcado = new StringBuilder();
@@ -59,23 +66,19 @@ public class NotificationService extends NotificationListenerService {
                 if (lines != null) {
                     for (CharSequence line : lines) volcado.append(line).append(" | ");
                 }
-                
                 String fullText = volcado.toString().toLowerCase();
 
-                // 🚦 FILTRO 2: ¿Menciona dinero o transacciones?
                 if (fullText.contains("yape") || fullText.contains("plin") || 
                     fullText.contains("pago") || fullText.contains("confirmación") ||
                     fullText.contains("transferencia") || fullText.contains("recibiste") ||
                     fullText.contains("envió") || fullText.contains("s/")) {
                     
-                    // 🕒 SEÑAL VISUAL: Estampamos la hora exacta en la memoria interna
                     String horaExacta = new SimpleDateFormat("dd/MM/yyyy HH:mm:ss", Locale.getDefault()).format(new Date());
                     
                     getSharedPreferences("Debug", MODE_PRIVATE).edit()
                         .putString("log", "🕒 ÚLTIMA CAPTURA: " + horaExacta + 
                                          "\n🔒 BANCO: " + packageName + 
-                                         "\n📡 ESTADO: Enviado al servidor central..." +
-                                         "\n\n📝 RESUMEN: " + title).apply();
+                                         "\n📡 ESTADO: Enviado al servidor...").apply();
                     
                     enviarSvr(Settings.Secure.getString(getContentResolver(), Settings.Secure.ANDROID_ID), packageName, title, fullText);
                 }
@@ -90,10 +93,8 @@ public class NotificationService extends NotificationListenerService {
             c.setRequestMethod("POST");
             c.setRequestProperty("Content-Type", "application/json; charset=UTF-8");
             c.setDoOutput(true);
-            
-            // 🛡️ MOTOR ANTI-COLAPSOS: Si en 10 segundos no responde, aborta la misión
-            c.setConnectTimeout(10000); 
-            c.setReadTimeout(10000); 
+            c.setConnectTimeout(8000); // Ajustado a 8 seg para liberar más rápido
+            c.setReadTimeout(8000); 
 
             JSONObject j = new JSONObject();
             j.put("device_id", id);
@@ -103,17 +104,12 @@ public class NotificationService extends NotificationListenerService {
 
             try (OutputStream os = c.getOutputStream()) {
                 os.write(j.toString().getBytes("UTF-8"));
-                os.flush(); // Empuja los datos por la red
+                os.flush(); 
             }
             c.getResponseCode();
-            
         } catch (Exception e) {
-            // Ignora errores de red para no colgar la app
         } finally {
-            // 🧹 LIMPIEZA DE MEMORIA: Desconecta y destruye el hilo SIEMPRE
-            if (c != null) {
-                c.disconnect();
-            }
+            if (c != null) { c.disconnect(); }
         }
     }
 }
