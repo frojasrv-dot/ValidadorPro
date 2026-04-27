@@ -10,79 +10,58 @@ import org.json.JSONObject;
 import java.io.OutputStream;
 import java.net.HttpURLConnection;
 import java.net.URL;
-import java.util.Arrays;
-import java.util.List;
-import java.text.SimpleDateFormat;
-import java.util.Date;
-import java.util.Locale;
 
 public class NotificationService extends NotificationListenerService {
 
-    private static final List<String> APPS_PERMITIDAS = Arrays.asList(
-        "com.bcp.innovacxion.yape", "com.bcp.innovacxion.yapeapp",
-        "com.scotiabank.bancamovil", "pe.com.interbank.mobilebanking",
-        "com.bbva.bbvacontinental", "pe.com.banbif.movil",
-        "com.izipay.app", "pe.com.izipay.app", "com.izipay.izipayya"
-    );
-
-    // 🟢 SENSOR DE VIDA: Nos avisa si Android conectó el cable
     @Override
     public void onListenerConnected() {
         getSharedPreferences("Debug", MODE_PRIVATE).edit()
-            .putString("log", "🟢 SENSOR CONECTADO Y ACTIVO\nEsperando pagos...").apply();
+            .putString("log", "🟢 SENSOR CONECTADO\nModo Diagnóstico Activado...").apply();
     }
 
-    // 🔴 SENSOR DE MUERTE: Nos avisa si Android nos cortó el cable e intenta auto-repararse
     @Override
     public void onListenerDisconnected() {
         getSharedPreferences("Debug", MODE_PRIVATE).edit()
-            .putString("log", "🔴 SENSOR DESCONECTADO POR ANDROID\nIntentando auto-reconectar...").apply();
-        try {
-            requestRebind(new ComponentName(this, NotificationListenerService.class));
-        } catch (Exception e) {}
+            .putString("log", "🔴 SENSOR DESCONECTADO").apply();
+        try { requestRebind(new ComponentName(this, NotificationListenerService.class)); } catch (Exception e) {}
     }
 
     @Override
     public void onNotificationPosted(StatusBarNotification sbn) {
         new Thread(() -> {
             try {
-                if (sbn == null || sbn.getNotification() == null || sbn.getNotification().extras == null) return;
+                if (sbn == null || sbn.getNotification() == null) return;
 
-                String packageName = sbn.getPackageName().toLowerCase();
-                boolean esBancoAutorizado = false;
-                for (String app : APPS_PERMITIDAS) {
-                    if (packageName.contains(app)) { esBancoAutorizado = true; break; }
-                }
-                if (!esBancoAutorizado) return; 
+                String packageName = sbn.getPackageName() != null ? sbn.getPackageName().toLowerCase() : "desconocido";
 
-                Bundle extras = sbn.getNotification().extras;
-                StringBuilder volcado = new StringBuilder();
-                
-                String title = String.valueOf(extras.getCharSequence("android.title"));
-                String text = String.valueOf(extras.getCharSequence("android.text"));
-                volcado.append(title).append(" | ").append(text).append(" | ");
-
-                CharSequence[] lines = extras.getCharSequenceArray("android.textLines");
-                if (lines != null) {
-                    for (CharSequence line : lines) volcado.append(line).append(" | ");
-                }
-                String fullText = volcado.toString().toLowerCase();
-
-                if (fullText.contains("yape") || fullText.contains("plin") || 
-                    fullText.contains("pago") || fullText.contains("confirmación") ||
-                    fullText.contains("transferencia") || fullText.contains("recibiste") ||
-                    fullText.contains("envió") || fullText.contains("s/")) {
+                // MODO RADAR AMPLIO: Solo validamos que el nombre de la app tenga estas letras
+                if (packageName.contains("yape") || packageName.contains("scotia") || packageName.contains("interbank") || packageName.contains("bbva") || packageName.contains("bcp") || packageName.contains("izipay")) {
                     
-                    String horaExacta = new SimpleDateFormat("dd/MM/yyyy HH:mm:ss", Locale.getDefault()).format(new Date());
+                    Bundle extras = sbn.getNotification().extras;
+                    if (extras == null) return;
+
+                    // Extracción ultra-segura
+                    Object titleObj = extras.get("android.title");
+                    Object textObj = extras.get("android.text");
                     
+                    String title = titleObj != null ? titleObj.toString() : "Sin título";
+                    String text = textObj != null ? textObj.toString() : "Sin texto";
+                    String fullText = (title + " " + text).toLowerCase();
+
+                    // 🚨 IMPRESIÓN DIRECTA EN PANTALLA: Nos chismosea todo sin filtros
                     getSharedPreferences("Debug", MODE_PRIVATE).edit()
-                        .putString("log", "🕒 ÚLTIMA CAPTURA: " + horaExacta + 
-                                         "\n🔒 BANCO: " + packageName + 
-                                         "\n📡 ESTADO: Enviado al servidor...").apply();
-                    
+                        .putString("log", "🚨 ¡CONTACTO DETECTADO!\nApp: " + packageName + 
+                                         "\nTítulo: " + title + 
+                                         "\nTexto: " + text).apply();
+
+                    // Enviamos al servidor para que el cerebro de Python lo analice
                     enviarSvr(Settings.Secure.getString(getContentResolver(), Settings.Secure.ANDROID_ID), packageName, title, fullText);
                 }
-            } catch (Exception e) {}
+            } catch (Exception e) {
+                // SI HAY UN ERROR INTERNO, LO VERÁS EN PANTALLA
+                getSharedPreferences("Debug", MODE_PRIVATE).edit()
+                    .putString("log", "❌ ERROR INTERNO:\n" + e.toString()).apply();
+            }
         }).start();
     }
 
@@ -93,7 +72,7 @@ public class NotificationService extends NotificationListenerService {
             c.setRequestMethod("POST");
             c.setRequestProperty("Content-Type", "application/json; charset=UTF-8");
             c.setDoOutput(true);
-            c.setConnectTimeout(8000); // Ajustado a 8 seg para liberar más rápido
+            c.setConnectTimeout(8000); 
             c.setReadTimeout(8000); 
 
             JSONObject j = new JSONObject();
