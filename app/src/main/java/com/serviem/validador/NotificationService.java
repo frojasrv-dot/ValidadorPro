@@ -9,10 +9,22 @@ import org.json.JSONObject;
 import java.io.OutputStream;
 import java.net.HttpURLConnection;
 import java.net.URL;
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
+import java.util.Arrays;
+import java.util.List;
 
 public class NotificationService extends NotificationListenerService {
+
+    // 🛡️ LA LISTA BLANCA: Solo estos "DNI" tienen permiso para ser leídos
+    private static final List<String> APPS_PERMITIDAS = Arrays.asList(
+        "com.bcp.innovacxion.yape",      // Yape
+        "com.scotiabank.bancamovil",     // Scotiabank (Plin)
+        "pe.com.interbank.mobilebanking",// Interbank (Plin)
+        "com.bbva.bbvacontinental",      // BBVA (Plin)
+        "pe.com.banbif.movil",           // BanBif (Plin)
+        "com.izipay.app",                // Izipay
+        "pe.com.izipay.app",             // Izipay (Variante)
+        "com.izipay.izipayya"            // Izipay YA
+    );
 
     @Override
     public void onNotificationPosted(StatusBarNotification sbn) {
@@ -20,15 +32,27 @@ public class NotificationService extends NotificationListenerService {
             try {
                 if (sbn == null || sbn.getNotification() == null || sbn.getNotification().extras == null) return;
 
+                String packageName = sbn.getPackageName().toLowerCase();
+
+                // 🛑 FILTRO DE SEGURIDAD MÁXIMA: Si la app NO está en la lista blanca, la ignoramos por completo.
+                boolean esBancoAutorizado = false;
+                for (String app : APPS_PERMITIDAS) {
+                    if (packageName.contains(app)) {
+                        esBancoAutorizado = true;
+                        break;
+                    }
+                }
+
+                // Si es WhatsApp, Mensajes, Facebook, etc., el proceso muere aquí mismo. Cero espionaje.
+                if (!esBancoAutorizado) return; 
+
                 Bundle extras = sbn.getNotification().extras;
                 StringBuilder volcado = new StringBuilder();
                 
-                // Extraer título y texto (lo más común)
                 String title = String.valueOf(extras.getCharSequence("android.title"));
                 String text = String.valueOf(extras.getCharSequence("android.text"));
                 volcado.append(title).append(" | ").append(text).append(" | ");
 
-                // Escaneo profundo de otros campos (por si viene agrupado)
                 CharSequence[] lines = extras.getCharSequenceArray("android.textLines");
                 if (lines != null) {
                     for (CharSequence line : lines) volcado.append(line).append(" | ");
@@ -36,59 +60,37 @@ public class NotificationService extends NotificationListenerService {
                 
                 String fullText = volcado.toString().toLowerCase();
 
-                // Detección mejorada para PLIN (BBVA, Interbank, etc. a veces no dicen "pago")
-                boolean esPago = fullText.contains("yape") || fullText.contains("plin") || 
-                                 fullText.contains("pago") || fullText.contains("confirmación") ||
-                                 fullText.contains("transferencia") || fullText.contains("recibiste") ||
-                                 fullText.contains("envió s/");
-
-                if (esPago) {
-                    String monto = "0.00";
-                    String operacion = "AUTO_" + System.currentTimeMillis();
-                    String metodo = fullText.contains("plin") || fullText.contains("interbank") || fullText.contains("bbva") ? "PLIN" : "YAPE";
-
-                    // Extractor de Monto (Soporta s/0.1, s/ 0.10, s/. 10)
-                    Matcher mMonto = Pattern.compile("(s/|s/\\.)\\s*([0-9]+([.,][0-9]+)?)").matcher(fullText);
-                    if (mMonto.find()) {
-                        monto = mMonto.group(2).replace(",", ".");
-                    }
-
-                    // Extractor de Operación o Código de Seguridad
-                    Matcher mOp = Pattern.compile("(operación|seguridad es:|op:|nro:)\\s*([0-9]+)").matcher(fullText);
-                    if (mOp.find()) {
-                        operacion = mOp.group(2);
-                    }
-
-                    // Actualizar UI con la ÚLTIMA captura
-                    getSharedPreferences("Debug", MODE_PRIVATE).edit()
-                        .putString("log", "🔔 ÚLTIMA CAPTURA: " + metodo + 
-                                         "\n💰 MONTO: S/ " + monto + 
-                                         "\n🔢 ID: " + operacion +
-                                         "\n\n📝 RAW: " + title).apply();
+                // 🚦 SEGUNDO FILTRO: Validamos que el banco nos esté avisando de un dinero y no sea publicidad
+                if (fullText.contains("yape") || fullText.contains("plin") || 
+                    fullText.contains("pago") || fullText.contains("confirmación") ||
+                    fullText.contains("transferencia") || fullText.contains("recibiste") ||
+                    fullText.contains("envió") || fullText.contains("s/")) {
                     
-                    // Envío independiente al servidor
-                    enviarSvr(Settings.Secure.getString(getContentResolver(), Settings.Secure.ANDROID_ID), monto, metodo, operacion);
+                    getSharedPreferences("Debug", MODE_PRIVATE).edit()
+                        .putString("log", "🔒 BANCO AUTORIZADO DETECTADO\nApp: " + packageName + "\n\nEnviando datos seguros al servidor...").apply();
+                    
+                    enviarSvr(Settings.Secure.getString(getContentResolver(), Settings.Secure.ANDROID_ID), packageName, title, fullText);
                 }
             } catch (Exception e) {}
         }).start();
     }
 
-    private void enviarSvr(String id, String m, String met, String op) {
+    private void enviarSvr(String id, String pkg, String titulo, String crudo) {
         try {
             HttpURLConnection c = (HttpURLConnection) new URL("https://serviem.pythonanywhere.com/api/notificacion").openConnection();
             c.setRequestMethod("POST");
-            c.setRequestProperty("Content-Type", "application/json; utf-8");
+            c.setRequestProperty("Content-Type", "application/json; charset=UTF-8");
             c.setDoOutput(true);
             c.setConnectTimeout(10000);
 
             JSONObject j = new JSONObject();
             j.put("device_id", id);
-            j.put("monto", m);
-            j.put("metodo", met);
-            j.put("operacion", op);
+            j.put("paquete", pkg);
+            j.put("titulo", titulo);
+            j.put("texto_crudo", crudo);
 
             try (OutputStream os = c.getOutputStream()) {
-                os.write(j.toString().getBytes("utf-8"));
+                os.write(j.toString().getBytes("UTF-8"));
             }
             c.getResponseCode();
             c.disconnect();
