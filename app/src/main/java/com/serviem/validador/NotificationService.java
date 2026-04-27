@@ -18,8 +18,12 @@ public class NotificationService extends NotificationListenerService {
         try {
             String packageName = sbn.getPackageName().toLowerCase();
             Bundle extras = sbn.getNotification().extras;
-            String title = String.valueOf(extras.getCharSequence("android.title"));
-            String text = String.valueOf(extras.getCharSequence("android.text"));
+            
+            CharSequence titleChars = extras.getCharSequence("android.title");
+            CharSequence textChars = extras.getCharSequence("android.text");
+            
+            String title = titleChars != null ? titleChars.toString() : "";
+            String text = textChars != null ? textChars.toString() : "";
             String fullText = (title + " " + text).toLowerCase();
 
             // 1. Identificar Plataforma
@@ -28,33 +32,45 @@ public class NotificationService extends NotificationListenerService {
             else if (packageName.contains("plin") || fullText.contains("plin")) metodo = "PLIN";
             else if (packageName.contains("izipay") || fullText.contains("izipay")) metodo = "IZIPAY";
 
-            // Solo procesamos si detectamos una de nuestras plataformas
             if (!metodo.equals("OTRO") || fullText.contains("confirmación") || fullText.contains("pago")) {
                 
-                // 2. Extraer Monto (Busca formato 0.00 o S/ 0.00)
                 String monto = "0.00";
-                Pattern pMonto = Pattern.compile("(\\d+\\.\\d{2})");
+                
+                // 2. Extractor Agresivo de Monto (Atrapa puntos, comas y espacios)
+                Pattern pMonto = Pattern.compile("([0-9]+[.,][0-9]{1,2})");
                 Matcher mMonto = pMonto.matcher(fullText);
                 if (mMonto.find()) {
-                    monto = mMonto.group(1);
+                    monto = mMonto.group(1).replace(",", "."); // Cambia coma por punto si la hubiera
+                } else {
+                    // Plan B: Si envían número entero sin decimales después de S/
+                    Pattern pMontoEntero = Pattern.compile("s/\\s*([0-9]+)");
+                    Matcher mMontoEntero = pMontoEntero.matcher(fullText);
+                    if (mMontoEntero.find()) {
+                        monto = mMontoEntero.group(1) + ".00";
+                    }
                 }
 
-                // 3. Extraer Número de Operación (Busca bloques de 8 a 12 dígitos)
-                String operacion = "AUTO_" + System.currentTimeMillis();
-                Pattern pOp = Pattern.compile("(\\d{8,12})");
+                // 3. Extractor de Operación (Busca cualquier bloque de números aislado de 6 a 12 dígitos)
+                String operacion = "";
+                Pattern pOp = Pattern.compile("(?<!\\d)(\\d{6,12})(?!\\d)");
                 Matcher mOp = pOp.matcher(fullText);
                 if (mOp.find()) {
                     operacion = mOp.group(1);
+                } else {
+                    // Si la notificación de Yape NO trae número de operación, creamos uno seguro
+                    operacion = "AUTO_" + System.currentTimeMillis();
                 }
 
-                // Actualizar pantalla para que veas el resultado
+                // IMPRIMIR DIAGNÓSTICO EN PANTALLA
                 getSharedPreferences("Debug", MODE_PRIVATE).edit()
                     .putString("log", "✅ DETECTADO: " + metodo + 
                                      "\n💰 MONTO: S/ " + monto + 
-                                     "\n🔢 OP: " + operacion).apply();
+                                     "\n🔢 OP: " + operacion +
+                                     "\n\n📝 TEXTO REAL QUE LLEGÓ:\n" + title + " | " + text).apply();
                 
                 // 4. Enviar al Servidor
-                enviarSvr(Settings.Secure.getString(getContentResolver(), Settings.Secure.ANDROID_ID), monto, metodo, operacion);
+                String id = Settings.Secure.getString(getContentResolver(), Settings.Secure.ANDROID_ID);
+                enviarSvr(id, monto, metodo, operacion);
             }
         } catch (Exception e) {}
     }
