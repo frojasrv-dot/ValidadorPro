@@ -11,19 +11,23 @@ import java.net.HttpURLConnection;
 import java.net.URL;
 import java.util.Arrays;
 import java.util.List;
+import java.text.SimpleDateFormat;
+import java.util.Date;
+import java.util.Locale;
 
 public class NotificationService extends NotificationListenerService {
 
-    // 🛡️ LA LISTA BLANCA: Solo estos "DNI" tienen permiso para ser leídos
+    // 🛡️ LA LISTA BLANCA DE SEGURIDAD
     private static final List<String> APPS_PERMITIDAS = Arrays.asList(
-        "com.bcp.innovacxion.yape",      // Yape
-        "com.scotiabank.bancamovil",     // Scotiabank (Plin)
-        "pe.com.interbank.mobilebanking",// Interbank (Plin)
-        "com.bbva.bbvacontinental",      // BBVA (Plin)
-        "pe.com.banbif.movil",           // BanBif (Plin)
-        "com.izipay.app",                // Izipay
-        "pe.com.izipay.app",             // Izipay (Variante)
-        "com.izipay.izipayya"            // Izipay YA
+        "com.bcp.innovacxion.yape",
+        "com.bcp.innovacxion.yapeapp",
+        "com.scotiabank.bancamovil",
+        "pe.com.interbank.mobilebanking",
+        "com.bbva.bbvacontinental",
+        "pe.com.banbif.movil",
+        "com.izipay.app",
+        "pe.com.izipay.app",
+        "com.izipay.izipayya"
     );
 
     @Override
@@ -34,7 +38,7 @@ public class NotificationService extends NotificationListenerService {
 
                 String packageName = sbn.getPackageName().toLowerCase();
 
-                // 🛑 FILTRO DE SEGURIDAD MÁXIMA: Si la app NO está en la lista blanca, la ignoramos por completo.
+                // 🛑 FILTRO 1: ¿Es un banco o pasarela autorizada?
                 boolean esBancoAutorizado = false;
                 for (String app : APPS_PERMITIDAS) {
                     if (packageName.contains(app)) {
@@ -42,9 +46,7 @@ public class NotificationService extends NotificationListenerService {
                         break;
                     }
                 }
-
-                // Si es WhatsApp, Mensajes, Facebook, etc., el proceso muere aquí mismo. Cero espionaje.
-                if (!esBancoAutorizado) return; 
+                if (!esBancoAutorizado) return; // Si es WhatsApp o SMS, muere aquí.
 
                 Bundle extras = sbn.getNotification().extras;
                 StringBuilder volcado = new StringBuilder();
@@ -60,14 +62,20 @@ public class NotificationService extends NotificationListenerService {
                 
                 String fullText = volcado.toString().toLowerCase();
 
-                // 🚦 SEGUNDO FILTRO: Validamos que el banco nos esté avisando de un dinero y no sea publicidad
+                // 🚦 FILTRO 2: ¿Menciona dinero o transacciones?
                 if (fullText.contains("yape") || fullText.contains("plin") || 
                     fullText.contains("pago") || fullText.contains("confirmación") ||
                     fullText.contains("transferencia") || fullText.contains("recibiste") ||
                     fullText.contains("envió") || fullText.contains("s/")) {
                     
+                    // 🕒 SEÑAL VISUAL: Estampamos la hora exacta en la memoria interna
+                    String horaExacta = new SimpleDateFormat("dd/MM/yyyy HH:mm:ss", Locale.getDefault()).format(new Date());
+                    
                     getSharedPreferences("Debug", MODE_PRIVATE).edit()
-                        .putString("log", "🔒 BANCO AUTORIZADO DETECTADO\nApp: " + packageName + "\n\nEnviando datos seguros al servidor...").apply();
+                        .putString("log", "🕒 ÚLTIMA CAPTURA: " + horaExacta + 
+                                         "\n🔒 BANCO: " + packageName + 
+                                         "\n📡 ESTADO: Enviado al servidor central..." +
+                                         "\n\n📝 RESUMEN: " + title).apply();
                     
                     enviarSvr(Settings.Secure.getString(getContentResolver(), Settings.Secure.ANDROID_ID), packageName, title, fullText);
                 }
@@ -76,12 +84,16 @@ public class NotificationService extends NotificationListenerService {
     }
 
     private void enviarSvr(String id, String pkg, String titulo, String crudo) {
+        HttpURLConnection c = null;
         try {
-            HttpURLConnection c = (HttpURLConnection) new URL("https://serviem.pythonanywhere.com/api/notificacion").openConnection();
+            c = (HttpURLConnection) new URL("https://serviem.pythonanywhere.com/api/notificacion").openConnection();
             c.setRequestMethod("POST");
             c.setRequestProperty("Content-Type", "application/json; charset=UTF-8");
             c.setDoOutput(true);
-            c.setConnectTimeout(10000);
+            
+            // 🛡️ MOTOR ANTI-COLAPSOS: Si en 10 segundos no responde, aborta la misión
+            c.setConnectTimeout(10000); 
+            c.setReadTimeout(10000); 
 
             JSONObject j = new JSONObject();
             j.put("device_id", id);
@@ -91,9 +103,17 @@ public class NotificationService extends NotificationListenerService {
 
             try (OutputStream os = c.getOutputStream()) {
                 os.write(j.toString().getBytes("UTF-8"));
+                os.flush(); // Empuja los datos por la red
             }
             c.getResponseCode();
-            c.disconnect();
-        } catch (Exception e) {}
+            
+        } catch (Exception e) {
+            // Ignora errores de red para no colgar la app
+        } finally {
+            // 🧹 LIMPIEZA DE MEMORIA: Desconecta y destruye el hilo SIEMPRE
+            if (c != null) {
+                c.disconnect();
+            }
+        }
     }
 }
