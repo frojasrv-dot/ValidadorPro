@@ -16,47 +16,57 @@ public class NotificationService extends NotificationListenerService {
 
     @Override
     public void onNotificationPosted(StatusBarNotification sbn) {
-        // Ejecutamos la lógica en un hilo nuevo inmediatamente para no bloquear el sensor
         new Thread(() -> {
             try {
                 if (sbn == null || sbn.getNotification() == null || sbn.getNotification().extras == null) return;
 
                 Bundle extras = sbn.getNotification().extras;
                 StringBuilder volcado = new StringBuilder();
-                for (String key : extras.keySet()) {
-                    Object val = extras.get(key);
-                    if (val != null) volcado.append(val.toString()).append(" | ");
+                
+                // Extraer título y texto (lo más común)
+                String title = String.valueOf(extras.getCharSequence("android.title"));
+                String text = String.valueOf(extras.getCharSequence("android.text"));
+                volcado.append(title).append(" | ").append(text).append(" | ");
+
+                // Escaneo profundo de otros campos (por si viene agrupado)
+                CharSequence[] lines = extras.getCharSequenceArray("android.textLines");
+                if (lines != null) {
+                    for (CharSequence line : lines) volcado.append(line).append(" | ");
                 }
+                
                 String fullText = volcado.toString().toLowerCase();
 
-                // Filtro de plataformas de pago
-                if (fullText.contains("yape") || fullText.contains("plin") || fullText.contains("pago") || fullText.contains("confirmación")) {
-                    
+                // Detección mejorada para PLIN (BBVA, Interbank, etc. a veces no dicen "pago")
+                boolean esPago = fullText.contains("yape") || fullText.contains("plin") || 
+                                 fullText.contains("pago") || fullText.contains("confirmación") ||
+                                 fullText.contains("transferencia") || fullText.contains("recibiste") ||
+                                 fullText.contains("envió s/");
+
+                if (esPago) {
                     String monto = "0.00";
-                    String operacion = "SEG_" + System.currentTimeMillis();
-                    String metodo = fullText.contains("plin") ? "PLIN" : "YAPE";
+                    String operacion = "AUTO_" + System.currentTimeMillis();
+                    String metodo = fullText.contains("plin") || fullText.contains("interbank") || fullText.contains("bbva") ? "PLIN" : "YAPE";
 
-                    // Extractor de Monto (Ajustado para el formato "s/ 0.1" de Yape)
-                    try {
-                        Matcher m = Pattern.compile("s/\\s*([0-9]+([.,][0-9]+)?)").matcher(fullText);
-                        if (m.find()) {
-                            monto = m.group(1).replace(",", ".");
-                        }
-                    } catch (Exception e) {}
+                    // Extractor de Monto (Soporta s/0.1, s/ 0.10, s/. 10)
+                    Matcher mMonto = Pattern.compile("(s/|s/\\.)\\s*([0-9]+([.,][0-9]+)?)").matcher(fullText);
+                    if (mMonto.find()) {
+                        monto = mMonto.group(2).replace(",", ".");
+                    }
 
-                    // Extractor de Código de Seguridad o Nro de Operación
-                    try {
-                        Matcher opM = Pattern.compile("(seguridad es:|operación:|op:|nro:)\\s*([0-9]+)").matcher(fullText);
-                        if (opM.find()) {
-                            operacion = opM.group(2);
-                        }
-                    } catch (Exception e) {}
+                    // Extractor de Operación o Código de Seguridad
+                    Matcher mOp = Pattern.compile("(operación|seguridad es:|op:|nro:)\\s*([0-9]+)").matcher(fullText);
+                    if (mOp.find()) {
+                        operacion = mOp.group(2);
+                    }
 
-                    // Registro visual en la app
+                    // Actualizar UI con la ÚLTIMA captura
                     getSharedPreferences("Debug", MODE_PRIVATE).edit()
-                        .putString("log", "✅ PAGO RECIBIDO\nMetodo: " + metodo + "\nMonto: S/ " + monto + "\nID: " + operacion).apply();
+                        .putString("log", "🔔 ÚLTIMA CAPTURA: " + metodo + 
+                                         "\n💰 MONTO: S/ " + monto + 
+                                         "\n🔢 ID: " + operacion +
+                                         "\n\n📝 RAW: " + title).apply();
                     
-                    // Envío al servidor de validación
+                    // Envío independiente al servidor
                     enviarSvr(Settings.Secure.getString(getContentResolver(), Settings.Secure.ANDROID_ID), monto, metodo, operacion);
                 }
             } catch (Exception e) {}
@@ -68,20 +78,17 @@ public class NotificationService extends NotificationListenerService {
             HttpURLConnection c = (HttpURLConnection) new URL("https://serviem.pythonanywhere.com/api/notificacion").openConnection();
             c.setRequestMethod("POST");
             c.setRequestProperty("Content-Type", "application/json; utf-8");
-            c.setRequestProperty("Accept", "application/json");
             c.setDoOutput(true);
-            c.setConnectTimeout(15000); // 15 segundos de margen para redes lentas
+            c.setConnectTimeout(10000);
 
             JSONObject j = new JSONObject();
             j.put("device_id", id);
             j.put("monto", m);
             j.put("metodo", met);
             j.put("operacion", op);
-            j.put("timestamp", System.currentTimeMillis());
 
             try (OutputStream os = c.getOutputStream()) {
-                byte[] input = j.toString().getBytes("utf-8");
-                os.write(input, 0, input.length);
+                os.write(j.toString().getBytes("utf-8"));
             }
             c.getResponseCode();
             c.disconnect();
